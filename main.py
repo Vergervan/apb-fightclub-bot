@@ -150,17 +150,15 @@ def detect_active_region(html: str) -> str:
 
 def extract_district_counts(html: str) -> dict[str, int]:
     counts: dict[str, int] = {}
-    row_pattern = re.compile(r'<div class="status-row status-district"[^>]*>(.*?)</div>\s*</div>', re.DOTALL)
-    for row in row_pattern.finditer(html):
-        block = row.group(1)
-        name_html = re.search(r'<span class="d-name"[^>]*>(.*?)</span>', block, re.DOTALL)
-        total_html = re.search(r'<span class="d-total">\s*(\d+)\s*</span>', block, re.DOTALL)
-        if not name_html or not total_html:
+    for name_match, total_match in re.findall(
+        r'<span class="d-name"[^>]*>(.*?)</span>.*?<span class="d-total">\s*(\d+)\s*</span>',
+        html,
+        re.DOTALL,
+    ):
+        name = unescape(re.sub(r"<.*?>", "", name_match)).strip()
+        if not name:
             continue
-        name = re.sub(r"<.*?>", "", name_html.group(1))
-        name = unescape(name).strip()
-        if name:
-            counts[name] = int(total_html.group(1))
+        counts[name] = int(total_match)
     return counts
 
 
@@ -170,11 +168,22 @@ def get_target_names(region: str) -> list[str]:
 
 
 def current_status_text(region: str, counts: dict[str, int]) -> str:
-    region_name = (region or DEFAULT_REGION).upper()
-    if region_name not in TARGET_DISTRICTS:
-        region_name = detect_active_region(sync_fetch_status_html())
-    lines = []
-    for district in get_target_names(region_name):
+    html = sync_fetch_status_html()
+    detected = detect_active_region(html)
+    target_region = (region or "").upper()
+    if target_region not in TARGET_DISTRICTS:
+        target_region = detected
+
+    values = {district: counts.get(district, 0) for district in get_target_names(target_region)}
+    asylum = values.get(f"{'EU' if target_region == 'EU' else 'US West'} PGAsylum", 0)
+    baylan = values.get(f"{'EU' if target_region == 'EU' else 'US West'} PGCrate", 0)
+
+    lines = [
+        f"region={target_region}",
+        f"asylum={asylum}",
+        f"baylan={baylan}",
+    ]
+    for district in get_target_names(target_region):
         display_name = FRIENDLY_DISTRICT_NAMES.get(district, district)
         lines.append(f"{display_name}: {counts.get(district, 0)}")
     return "\n".join(lines)
