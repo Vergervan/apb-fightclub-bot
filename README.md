@@ -1,6 +1,6 @@
 # APB Fight Club Bot
 
-Telegram-бот для отслеживания онлайн-статуса районов (districts) в игре APB Reloaded по данным сайта GamersFirst.
+Telegram-бот для отслеживания онлайн-статуса районов в игре APB Reloaded по данным сайта GamersFirst.
 
 ## Что делает бот
 
