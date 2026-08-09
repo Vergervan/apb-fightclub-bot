@@ -168,21 +168,11 @@ def get_target_names(region: str) -> list[str]:
 
 
 def current_status_text(region: str, counts: dict[str, int]) -> str:
-    html = sync_fetch_status_html()
-    detected = detect_active_region(html)
-    target_region = (region or "").upper()
+    target_region = (region or DEFAULT_REGION).upper()
     if target_region not in TARGET_DISTRICTS:
-        target_region = detected
+        target_region = DEFAULT_REGION
 
-    values = {district: counts.get(district, 0) for district in get_target_names(target_region)}
-    asylum = values.get(f"{'EU' if target_region == 'EU' else 'US West'} PGAsylum", 0)
-    baylan = values.get(f"{'EU' if target_region == 'EU' else 'US West'} PGCrate", 0)
-
-    lines = [
-        f"region={target_region}",
-        f"asylum={asylum}",
-        f"baylan={baylan}",
-    ]
+    lines = []
     for district in get_target_names(target_region):
         display_name = FRIENDLY_DISTRICT_NAMES.get(district, district)
         lines.append(f"{display_name}: {counts.get(district, 0)}")
@@ -190,10 +180,11 @@ def current_status_text(region: str, counts: dict[str, int]) -> str:
 
 
 def pick_region(region: str, html: str) -> str:
-    normalized = (region or "").upper()
+    del html
+    normalized = (region or DEFAULT_REGION).upper()
     if normalized in TARGET_DISTRICTS:
         return normalized
-    return detect_active_region(html)
+    return DEFAULT_REGION
 
 
 def parse_args() -> argparse.Namespace:
@@ -318,10 +309,16 @@ async def status_command(message: types.Message):
 
 async def region_command(message: types.Message):
     args = message.text.split(maxsplit=1)
-    region = (args[1].strip().upper() if len(args) > 1 else "EU")
+    if len(args) < 2:
+        region = USER_REGIONS.get(message.chat.id, DEFAULT_REGION)
+        await message.answer(f"Current region: {region}")
+        return
+
+    region = args[1].strip().upper()
     if region not in TARGET_DISTRICTS:
         await message.answer("Unknown region. Use EU or NA.")
         return
+
     USER_REGIONS[message.chat.id] = region
     save_state()
     await message.answer(f"Region set to: {region}")
