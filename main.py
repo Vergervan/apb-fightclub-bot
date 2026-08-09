@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import asyncio
 import json
 import os
@@ -13,7 +14,8 @@ from aiogram.filters import Command
 
 SITE_URL = "https://www.gamersfirst.com/apb/status"
 DEFAULT_REGION = "EU"
-CHECK_INTERVAL_SECONDS = 60
+DEFAULT_CHECK_INTERVAL_SECONDS = 60
+DEFAULT_DISTRICT_THRESHOLD = 4
 TARGET_DISTRICTS = {
     "EU": ["EU PGAsylum", "EU PGCrate"],
     "NA": ["US West PGAsylum", "US West PGCrate"],
@@ -30,6 +32,7 @@ ACTIVE_CHATS = set()
 LAST_ALERT_STATE = {}
 USER_REGIONS = {}
 LAST_DISTRICT_COUNTS = {}
+USER_THRESHOLDS = {}
 
 
 def load_state() -> dict[str, object]:
@@ -53,6 +56,7 @@ def save_state() -> None:
     payload = {
         "active_chats": sorted(ACTIVE_CHATS),
         "user_regions": {str(chat_id): region for chat_id, region in USER_REGIONS.items()},
+        "user_thresholds": {str(chat_id): value for chat_id, value in USER_THRESHOLDS.items()},
     }
     STATE_FILE.write_text(__import__("json").dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -61,9 +65,11 @@ def restore_state() -> None:
     state = load_state()
     active_chats = state.get("active_chats", [])
     user_regions = state.get("user_regions", {})
+    user_thresholds = state.get("user_thresholds", {})
 
     ACTIVE_CHATS.clear()
     USER_REGIONS.clear()
+    USER_THRESHOLDS.clear()
     for chat_id in active_chats:
         try:
             ACTIVE_CHATS.add(int(chat_id))
@@ -80,9 +86,18 @@ def restore_state() -> None:
         else:
             USER_REGIONS[chat_id_int] = DEFAULT_REGION
 
+    for chat_id, value in user_thresholds.items():
+        try:
+            chat_id_int = int(chat_id)
+            threshold = int(value)
+        except (TypeError, ValueError):
+            continue
+        USER_THRESHOLDS[chat_id_int] = max(0, threshold)
+
     for chat_id in list(ACTIVE_CHATS):
         LAST_ALERT_STATE.setdefault(chat_id, None)
         USER_REGIONS.setdefault(chat_id, DEFAULT_REGION)
+        USER_THRESHOLDS.setdefault(chat_id, DEFAULT_DISTRICT_THRESHOLD)
 
 
 def get_telegram_token():
@@ -149,6 +164,13 @@ def current_status_text(region: str, counts: dict[str, int]) -> str:
     return "\n".join(lines)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="APB Fight Club bot")
+    parser.add_argument("-i", "--interval", type=int, default=DEFAULT_CHECK_INTERVAL_SECONDS, help="Polling interval in seconds")
+    parser.add_argument("-t", "--threshold", type=int, default=DEFAULT_DISTRICT_THRESHOLD, help="Threshold value for district comparison")
+    return parser.parse_args()
+
+
 async def send_message(bot: Bot, chat_id: int, text: str) -> bool:
     try:
         await bot.send_message(chat_id, text, parse_mode="HTML")
@@ -158,7 +180,7 @@ async def send_message(bot: Bot, chat_id: int, text: str) -> bool:
         return False
 
 
-async def check_and_notify(bot: Bot, chat_id: int, region: str):
+async def check_and_notify(bot: Bot, chat_id: int, region: str, threshold: int = DEFAULT_DISTRICT_THRESHOLD):
     try:
         html = await fetch_status_html(region)
         counts = extract_district_counts(html)
@@ -169,11 +191,31 @@ async def check_and_notify(bot: Bot, chat_id: int, region: str):
     previous = LAST_DISTRICT_COUNTS.get(chat_id, {})
     current = {district: counts.get(district, 0) for district in get_target_names(region)}
 
-    changed = any(previous.get(district) != current.get(district) for district in current)
+    changed_districts = []
+    for district in get_target_names(region):
+        prev_value = previous.get(district)
+        curr_value = current.get(district, 0)
+
+        if prev_value is None:
+            if curr_value > threshold:
+                changed_districts.append(district)
+            continue
+
+        if prev_value <= threshold < curr_value:
+            changed_districts.append(district)
+            continue
+
+        if prev_value > threshold and curr_value <= threshold:
+            changed_districts.append(district)
+
     LAST_DISTRICT_COUNTS[chat_id] = current
 
-    if changed:
-        await send_message(bot, chat_id, current_status_text(region, counts))
+    if changed_districts:
+        lines = [
+            f"{FRIENDLY_DISTRICT_NAMES.get(district, district)}: {counts.get(district, 0)}"
+            for district in changed_districts
+        ]
+        await send_message(bot, chat_id, "\n".join(lines))
 
 
 async def command_status(bot: Bot, chat_id: int, region: str):
@@ -187,22 +229,24 @@ async def command_status(bot: Bot, chat_id: int, region: str):
     await send_message(bot, chat_id, current_status_text(region, counts))
 
 
-async def scheduler(bot: Bot):
+async def scheduler(bot: Bot, check_interval: int, default_threshold: int):
     while True:
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+        await asyncio.sleep(check_interval)
         for chat_id in list(ACTIVE_CHATS):
             region = USER_REGIONS.get(chat_id, DEFAULT_REGION)
-            await check_and_notify(bot, chat_id, region)
+            threshold = USER_THRESHOLDS.get(chat_id, default_threshold)
+            await check_and_notify(bot, chat_id, region, threshold)
 
 
 async def start_command(message: types.Message):
     ACTIVE_CHATS.add(message.chat.id)
     LAST_ALERT_STATE.setdefault(message.chat.id, None)
     USER_REGIONS.setdefault(message.chat.id, DEFAULT_REGION)
+    USER_THRESHOLDS.setdefault(message.chat.id, DEFAULT_DISTRICT_THRESHOLD)
     save_state()
     await message.answer(
         "Бот запущен. Слежение идёт за Europe по умолчанию.\n\n"
-        "Команды:\n/start — включить таймер\n/stop — остановить\n/status — текущее число\n/region EU — выбрать Europe\n/region NA — выбрать North America"
+        "Команды:\n/stop — остановить\n/status — текущее число\n/region EU — выбрать Europe\n/region NA — выбрать North America\n/threshold [число] — установить порог"
     )
 
 
@@ -212,6 +256,24 @@ async def stop_command(message: types.Message):
     LAST_DISTRICT_COUNTS.pop(message.chat.id, None)
     save_state()
     await message.answer("Отслеживание остановлено.")
+
+
+async def threshold_command(message: types.Message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        current = USER_THRESHOLDS.get(message.chat.id, DEFAULT_DISTRICT_THRESHOLD)
+        await message.answer(f"Текущий threshold: {current}")
+        return
+
+    try:
+        value = int(args[1].strip())
+    except ValueError:
+        await message.answer("Нужно число. Пример: /threshold 4")
+        return
+
+    USER_THRESHOLDS[message.chat.id] = max(0, value)
+    save_state()
+    await message.answer(f"Threshold установлен: {USER_THRESHOLDS[message.chat.id]}")
 
 
 async def status_command(message: types.Message):
@@ -232,11 +294,12 @@ async def region_command(message: types.Message):
 
 async def help_command(message: types.Message):
     await message.answer(
-        "Команды:\n/start — запустить\n/stop — остановить\n/status — текущее состояние\n/region EU — Europe\n/region NA — North America"
+        "Команды:\n/start — запустить\n/stop — остановить\n/status — текущее состояние\n/region EU — Europe\n/region NA — North America\n/threshold 4 — установить порог"
     )
 
 
 async def main():
+    args = parse_args()
     restore_state()
     token = get_telegram_token()
     bot = Bot(token=token)
@@ -246,9 +309,10 @@ async def main():
     dp.message(Command("stop"))(stop_command)
     dp.message(Command("status"))(status_command)
     dp.message(Command("region"))(region_command)
+    dp.message(Command("threshold"))(threshold_command)
     dp.message(Command("help"))(help_command)
 
-    asyncio.create_task(scheduler(bot))
+    asyncio.create_task(scheduler(bot, args.interval, args.threshold))
     await dp.start_polling(bot)
 
 
