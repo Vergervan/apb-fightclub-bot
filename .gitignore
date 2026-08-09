@@ -2,3 +2,4 @@
 telegram_token.txt
 __pycache__/
 *.pyc
+main_local.py

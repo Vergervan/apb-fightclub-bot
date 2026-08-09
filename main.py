@@ -135,11 +135,13 @@ async def fetch_status_html(region: str = DEFAULT_REGION) -> str:
 
 
 def detect_active_region(html: str) -> str:
-    for pattern in [
-        r'class="status-tab[^\"]*is-active[^\"]*"[^>]*data-region="(EU|NA)"',
+    patterns = [
+        r'class="[^"]*status-tab[^"]*is-active[^"]*"[^>]*data-region="(EU|NA)"',
+        r'class="[^"]*is-active[^"]*status-tab[^"]*"[^>]*data-region="(EU|NA)"',
         r'data-region="(EU|NA)"[^>]*aria-selected="true"',
         r'data-region="(EU|NA)"',
-    ]:
+    ]
+    for pattern in patterns:
         match = re.search(pattern, html, re.IGNORECASE)
         if match:
             return match.group(1).upper()
@@ -178,6 +180,13 @@ def current_status_text(region: str, counts: dict[str, int]) -> str:
     return "\n".join(lines)
 
 
+def pick_region(region: str, html: str) -> str:
+    normalized = (region or "").upper()
+    if normalized in TARGET_DISTRICTS:
+        return normalized
+    return detect_active_region(html)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="APB Fight Club bot")
     parser.add_argument("-i", "--interval", type=int, default=DEFAULT_CHECK_INTERVAL_SECONDS, help="Polling interval in seconds")
@@ -198,8 +207,8 @@ async def check_and_notify(bot: Bot, chat_id: int, region: str, threshold: int =
     try:
         html = await fetch_status_html(region)
         counts = extract_district_counts(html)
-        active_region = detect_active_region(html)
-        target_names = get_target_names(active_region)
+        target_region = pick_region(region, html)
+        target_names = get_target_names(target_region)
     except Exception as exc:
         await send_message(bot, chat_id, f"Failed to fetch status: {exc}")
         return
@@ -238,8 +247,7 @@ async def command_status(bot: Bot, chat_id: int, region: str):
     try:
         html = await fetch_status_html(region)
         counts = extract_district_counts(html)
-        active_region = detect_active_region(html)
-        region = active_region
+        region = pick_region(region, html)
     except Exception as exc:
         await send_message(bot, chat_id, f"Failed to fetch status: {exc}")
         return
