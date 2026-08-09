@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  apb-bot:
+    build: .
+    container_name: apb-fight-club-bot
+    environment:
+      TELEGRAM_TOKEN_FILE: /run/secrets/telegram_token
+    volumes:
+      - ./telegram_token.txt:/run/secrets/telegram_token:ro
+    restart: unless-stopped
