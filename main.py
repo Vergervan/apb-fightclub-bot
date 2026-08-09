@@ -215,6 +215,7 @@ async def check_and_notify(bot: Bot, chat_id: int, region: str, threshold: int =
 
     previous = LAST_DISTRICT_COUNTS.get(chat_id, {})
     current = {district: counts.get(district, 0) for district in target_names}
+    print(f"[auto-check] chat={chat_id} region={target_region} threshold={threshold} previous={previous} current={current}")
 
     changed_districts = []
     for district in target_names:
@@ -233,6 +234,8 @@ async def check_and_notify(bot: Bot, chat_id: int, region: str, threshold: int =
         if prev_value > threshold and curr_value <= threshold:
             changed_districts.append(district)
 
+    print(f"[auto-check] chat={chat_id} target={target_region} changed={changed_districts}")
+
     LAST_DISTRICT_COUNTS[chat_id] = current
 
     if changed_districts:
@@ -240,6 +243,7 @@ async def check_and_notify(bot: Bot, chat_id: int, region: str, threshold: int =
             f"{FRIENDLY_DISTRICT_NAMES.get(district, district)}: {counts.get(district, 0)}"
             for district in changed_districts
         ]
+        print(f"[auto-notify] chat={chat_id} region={target_region} sending={lines}")
         await send_message(bot, chat_id, "\n".join(lines))
 
 
@@ -257,11 +261,14 @@ async def command_status(bot: Bot, chat_id: int, region: str):
 
 async def scheduler(bot: Bot, check_interval: int, default_threshold: int):
     while True:
-        await asyncio.sleep(check_interval)
         for chat_id in list(ACTIVE_CHATS):
             region = USER_REGIONS.get(chat_id, DEFAULT_REGION)
             threshold = USER_THRESHOLDS.get(chat_id, default_threshold)
             await check_and_notify(bot, chat_id, region, threshold)
+
+        if check_interval <= 0:
+            break
+        await asyncio.sleep(check_interval)
 
 
 async def start_command(message: types.Message):
@@ -269,6 +276,7 @@ async def start_command(message: types.Message):
     LAST_ALERT_STATE.setdefault(message.chat.id, None)
     USER_REGIONS.setdefault(message.chat.id, DEFAULT_REGION)
     USER_THRESHOLDS.setdefault(message.chat.id, DEFAULT_DISTRICT_THRESHOLD)
+    LAST_DISTRICT_COUNTS.pop(message.chat.id, None)
     save_state()
     await message.answer(
         "Bot started. Monitoring Europe by default.\n\n"
@@ -320,6 +328,7 @@ async def region_command(message: types.Message):
         return
 
     USER_REGIONS[message.chat.id] = region
+    LAST_DISTRICT_COUNTS.pop(message.chat.id, None)
     save_state()
     await message.answer(f"Region set to: {region}")
 
