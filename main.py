@@ -14,7 +14,7 @@ from aiogram.filters import Command
 
 SITE_URL = "https://www.gamersfirst.com/apb/status"
 DEFAULT_REGION = "EU"
-DEFAULT_CHECK_INTERVAL_SECONDS = 60
+DEFAULT_CHECK_INTERVAL_SECONDS = 300
 DEFAULT_DISTRICT_THRESHOLD = 4
 TARGET_DISTRICTS = {
     "EU": ["EU PGAsylum", "EU PGCrate"],
@@ -117,11 +117,9 @@ def get_telegram_token():
     raise RuntimeError("TELEGRAM_TOKEN is not set")
 
 
-def sync_fetch_status_html(region: str = DEFAULT_REGION) -> str:
-    params = {"region": region}
-    url = f"{SITE_URL}?{urllib.parse.urlencode(params)}"
+def sync_fetch_status_html() -> str:
     request = urllib.request.Request(
-        url,
+        SITE_URL,
         headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
@@ -132,7 +130,20 @@ def sync_fetch_status_html(region: str = DEFAULT_REGION) -> str:
 
 
 async def fetch_status_html(region: str = DEFAULT_REGION) -> str:
-    return await asyncio.to_thread(sync_fetch_status_html, region)
+    del region
+    return await asyncio.to_thread(sync_fetch_status_html)
+
+
+def detect_active_region(html: str) -> str:
+    for pattern in [
+        r'class="status-tab[^\"]*is-active[^\"]*"[^>]*data-region="(EU|NA)"',
+        r'data-region="(EU|NA)"[^>]*aria-selected="true"',
+        r'data-region="(EU|NA)"',
+    ]:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+    return DEFAULT_REGION
 
 
 def extract_district_counts(html: str) -> dict[str, int]:
@@ -157,8 +168,11 @@ def get_target_names(region: str) -> list[str]:
 
 
 def current_status_text(region: str, counts: dict[str, int]) -> str:
+    region_name = (region or DEFAULT_REGION).upper()
+    if region_name not in TARGET_DISTRICTS:
+        region_name = detect_active_region(sync_fetch_status_html())
     lines = []
-    for district in get_target_names(region):
+    for district in get_target_names(region_name):
         display_name = FRIENDLY_DISTRICT_NAMES.get(district, district)
         lines.append(f"{display_name}: {counts.get(district, 0)}")
     return "\n".join(lines)
@@ -184,15 +198,17 @@ async def check_and_notify(bot: Bot, chat_id: int, region: str, threshold: int =
     try:
         html = await fetch_status_html(region)
         counts = extract_district_counts(html)
+        active_region = detect_active_region(html)
+        target_names = get_target_names(active_region)
     except Exception as exc:
-        await send_message(bot, chat_id, f"Не удалось получить статус: {exc}")
+        await send_message(bot, chat_id, f"Failed to fetch status: {exc}")
         return
 
     previous = LAST_DISTRICT_COUNTS.get(chat_id, {})
-    current = {district: counts.get(district, 0) for district in get_target_names(region)}
+    current = {district: counts.get(district, 0) for district in target_names}
 
     changed_districts = []
-    for district in get_target_names(region):
+    for district in target_names:
         prev_value = previous.get(district)
         curr_value = current.get(district, 0)
 
@@ -222,8 +238,10 @@ async def command_status(bot: Bot, chat_id: int, region: str):
     try:
         html = await fetch_status_html(region)
         counts = extract_district_counts(html)
+        active_region = detect_active_region(html)
+        region = active_region
     except Exception as exc:
-        await send_message(bot, chat_id, f"Не удалось получить статус: {exc}")
+        await send_message(bot, chat_id, f"Failed to fetch status: {exc}")
         return
 
     await send_message(bot, chat_id, current_status_text(region, counts))
@@ -245,8 +263,8 @@ async def start_command(message: types.Message):
     USER_THRESHOLDS.setdefault(message.chat.id, DEFAULT_DISTRICT_THRESHOLD)
     save_state()
     await message.answer(
-        "Бот запущен. Слежение идёт за Europe по умолчанию.\n\n"
-        "Команды:\n/stop — остановить\n/status — текущее число\n/region EU — выбрать Europe\n/region NA — выбрать North America\n/threshold [число] — установить порог"
+        "Bot started. Monitoring Europe by default.\n\n"
+        "Commands:\n/stop — stop monitoring\n/status — current values\n/region EU — select Europe\n/region NA — select North America\n/threshold [number] — set the threshold"
     )
 
 
@@ -255,25 +273,25 @@ async def stop_command(message: types.Message):
     LAST_ALERT_STATE.pop(message.chat.id, None)
     LAST_DISTRICT_COUNTS.pop(message.chat.id, None)
     save_state()
-    await message.answer("Отслеживание остановлено.")
+    await message.answer("Monitoring stopped.")
 
 
 async def threshold_command(message: types.Message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         current = USER_THRESHOLDS.get(message.chat.id, DEFAULT_DISTRICT_THRESHOLD)
-        await message.answer(f"Текущий threshold: {current}")
+        await message.answer(f"Current threshold: {current}")
         return
 
     try:
         value = int(args[1].strip())
     except ValueError:
-        await message.answer("Нужно число. Пример: /threshold 4")
+        await message.answer("Please send a number. Example: /threshold 4")
         return
 
     USER_THRESHOLDS[message.chat.id] = max(0, value)
     save_state()
-    await message.answer(f"Threshold установлен: {USER_THRESHOLDS[message.chat.id]}")
+    await message.answer(f"Threshold set to: {USER_THRESHOLDS[message.chat.id]}")
 
 
 async def status_command(message: types.Message):
@@ -285,16 +303,16 @@ async def region_command(message: types.Message):
     args = message.text.split(maxsplit=1)
     region = (args[1].strip().upper() if len(args) > 1 else "EU")
     if region not in TARGET_DISTRICTS:
-        await message.answer("Неизвестный регион. Используйте EU или NA.")
+        await message.answer("Unknown region. Use EU or NA.")
         return
     USER_REGIONS[message.chat.id] = region
     save_state()
-    await message.answer(f"Регион установлен: {region}")
+    await message.answer(f"Region set to: {region}")
 
 
 async def help_command(message: types.Message):
     await message.answer(
-        "Команды:\n/start — запустить\n/stop — остановить\n/status — текущее состояние\n/region EU — Europe\n/region NA — North America\n/threshold 4 — установить порог"
+        "Commands:\n/start — start monitoring\n/stop — stop monitoring\n/status — current district status\n/region EU — Europe\n/region NA — North America\n/threshold 4 — set threshold"
     )
 
 
