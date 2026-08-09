@@ -26,7 +26,7 @@ FRIENDLY_DISTRICT_NAMES = {
     "US West PGAsylum": "NA Asylum",
     "US West PGCrate": "NA Baylan",
 }
-STATE_FILE = Path(__file__).with_name("bot_state.json")
+STATE_FILE = Path("/app/data/bot_state.json")
 
 ACTIVE_CHATS = set()
 LAST_ALERT_STATE = {}

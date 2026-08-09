@@ -8,4 +8,5 @@ services:
       TELEGRAM_TOKEN_FILE: /run/secrets/telegram_token
     volumes:
       - ./telegram_token.txt:/run/secrets/telegram_token:ro
+      - ./data:/app/data
     restart: unless-stopped
