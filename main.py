@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import json
 import os
 import re
 import urllib.parse
@@ -12,16 +13,76 @@ from aiogram.filters import Command
 
 SITE_URL = "https://www.gamersfirst.com/apb/status"
 DEFAULT_REGION = "EU"
-ALERT_THRESHOLD = 3
 CHECK_INTERVAL_SECONDS = 60
 TARGET_DISTRICTS = {
     "EU": ["EU PGAsylum", "EU PGCrate"],
     "NA": ["US West PGAsylum", "US West PGCrate"],
 }
+FRIENDLY_DISTRICT_NAMES = {
+    "EU PGAsylum": "EU Asylum",
+    "EU PGCrate": "EU Baylan",
+    "US West PGAsylum": "NA Asylum",
+    "US West PGCrate": "NA Baylan",
+}
+STATE_FILE = Path(__file__).with_name("bot_state.json")
 
 ACTIVE_CHATS = set()
 LAST_ALERT_STATE = {}
 USER_REGIONS = {}
+LAST_DISTRICT_COUNTS = {}
+
+
+def load_state() -> dict[str, object]:
+    if not STATE_FILE.exists():
+        return {"active_chats": [], "user_regions": {}}
+
+    try:
+        data = STATE_FILE.read_text(encoding="utf-8")
+        if not data.strip():
+            return {"active_chats": [], "user_regions": {}}
+        parsed = __import__("json").loads(data)
+        if isinstance(parsed, dict):
+            return parsed
+    except (OSError, ValueError):
+        pass
+
+    return {"active_chats": [], "user_regions": {}}
+
+
+def save_state() -> None:
+    payload = {
+        "active_chats": sorted(ACTIVE_CHATS),
+        "user_regions": {str(chat_id): region for chat_id, region in USER_REGIONS.items()},
+    }
+    STATE_FILE.write_text(__import__("json").dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def restore_state() -> None:
+    state = load_state()
+    active_chats = state.get("active_chats", [])
+    user_regions = state.get("user_regions", {})
+
+    ACTIVE_CHATS.clear()
+    USER_REGIONS.clear()
+    for chat_id in active_chats:
+        try:
+            ACTIVE_CHATS.add(int(chat_id))
+        except (TypeError, ValueError):
+            continue
+
+    for chat_id, region in user_regions.items():
+        try:
+            chat_id_int = int(chat_id)
+        except (TypeError, ValueError):
+            continue
+        if region in TARGET_DISTRICTS:
+            USER_REGIONS[chat_id_int] = region
+        else:
+            USER_REGIONS[chat_id_int] = DEFAULT_REGION
+
+    for chat_id in list(ACTIVE_CHATS):
+        LAST_ALERT_STATE.setdefault(chat_id, None)
+        USER_REGIONS.setdefault(chat_id, DEFAULT_REGION)
 
 
 def get_telegram_token():
@@ -42,10 +103,6 @@ def get_telegram_token():
 
 
 def sync_fetch_status_html(region: str = DEFAULT_REGION) -> str:
-    local_file = Path(__file__).with_name("District Status - APB Reloaded - GamersFirst.html")
-    if local_file.exists():
-        return local_file.read_text(encoding="utf-8", errors="replace")
-
     params = {"region": region}
     url = f"{SITE_URL}?{urllib.parse.urlencode(params)}"
     request = urllib.request.Request(
@@ -85,16 +142,11 @@ def get_target_names(region: str) -> list[str]:
 
 
 def current_status_text(region: str, counts: dict[str, int]) -> str:
-    return "\n".join(f"{district}: {counts.get(district, 0)}" for district in get_target_names(region))
-
-
-def alert_state_for_region(region: str, counts: dict[str, int]) -> str:
-    values = [counts.get(name, 0) for name in get_target_names(region)]
-    if all(value > ALERT_THRESHOLD for value in values):
-        return "high"
-    if all(value < ALERT_THRESHOLD for value in values):
-        return "low"
-    return "stable"
+    lines = []
+    for district in get_target_names(region):
+        display_name = FRIENDLY_DISTRICT_NAMES.get(district, district)
+        lines.append(f"{display_name}: {counts.get(district, 0)}")
+    return "\n".join(lines)
 
 
 async def send_message(bot: Bot, chat_id: int, text: str) -> bool:
@@ -114,23 +166,14 @@ async def check_and_notify(bot: Bot, chat_id: int, region: str):
         await send_message(bot, chat_id, f"Не удалось получить статус: {exc}")
         return
 
-    state = alert_state_for_region(region, counts)
-    prev_state = LAST_ALERT_STATE.get(chat_id)
+    previous = LAST_DISTRICT_COUNTS.get(chat_id, {})
+    current = {district: counts.get(district, 0) for district in get_target_names(region)}
 
-    if state == "high" and prev_state != "high":
-        text = f"🔥 {region} alert: оба района выше {ALERT_THRESHOLD}!\n{current_status_text(region, counts)}"
-        await send_message(bot, chat_id, text)
-        LAST_ALERT_STATE[chat_id] = "high"
-        return
+    changed = any(previous.get(district) != current.get(district) for district in current)
+    LAST_DISTRICT_COUNTS[chat_id] = current
 
-    if state == "low" and prev_state != "low":
-        text = f"📉 {region} alert: оба района меньше {ALERT_THRESHOLD}.\n{current_status_text(region, counts)}"
-        await send_message(bot, chat_id, text)
-        LAST_ALERT_STATE[chat_id] = "low"
-        return
-
-    if state == "stable":
-        LAST_ALERT_STATE[chat_id] = prev_state if prev_state in {"high", "low"} else None
+    if changed:
+        await send_message(bot, chat_id, current_status_text(region, counts))
 
 
 async def command_status(bot: Bot, chat_id: int, region: str):
@@ -141,7 +184,7 @@ async def command_status(bot: Bot, chat_id: int, region: str):
         await send_message(bot, chat_id, f"Не удалось получить статус: {exc}")
         return
 
-    await send_message(bot, chat_id, f"Status for {region}:\n{current_status_text(region, counts)}")
+    await send_message(bot, chat_id, current_status_text(region, counts))
 
 
 async def scheduler(bot: Bot):
@@ -156,6 +199,7 @@ async def start_command(message: types.Message):
     ACTIVE_CHATS.add(message.chat.id)
     LAST_ALERT_STATE.setdefault(message.chat.id, None)
     USER_REGIONS.setdefault(message.chat.id, DEFAULT_REGION)
+    save_state()
     await message.answer(
         "Бот запущен. Слежение идёт за Europe по умолчанию.\n\n"
         "Команды:\n/start — включить таймер\n/stop — остановить\n/status — текущее число\n/region EU — выбрать Europe\n/region NA — выбрать North America"
@@ -165,6 +209,8 @@ async def start_command(message: types.Message):
 async def stop_command(message: types.Message):
     ACTIVE_CHATS.discard(message.chat.id)
     LAST_ALERT_STATE.pop(message.chat.id, None)
+    LAST_DISTRICT_COUNTS.pop(message.chat.id, None)
+    save_state()
     await message.answer("Отслеживание остановлено.")
 
 
@@ -180,6 +226,7 @@ async def region_command(message: types.Message):
         await message.answer("Неизвестный регион. Используйте EU или NA.")
         return
     USER_REGIONS[message.chat.id] = region
+    save_state()
     await message.answer(f"Регион установлен: {region}")
 
 
@@ -190,6 +237,7 @@ async def help_command(message: types.Message):
 
 
 async def main():
+    restore_state()
     token = get_telegram_token()
     bot = Bot(token=token)
     dp = Dispatcher()
