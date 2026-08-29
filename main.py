@@ -213,26 +213,24 @@ async def check_and_notify(bot: Bot, chat_id: int, region: str, threshold: int =
         await send_message(bot, chat_id, f"Failed to fetch status: {exc}")
         return
 
-    previous = LAST_DISTRICT_COUNTS.get(chat_id, {})
+    previous = LAST_DISTRICT_COUNTS.get(chat_id)
     current = {district: counts.get(district, 0) for district in target_names}
     print(f"[auto-check] chat={chat_id} region={target_region} threshold={threshold} previous={previous} current={current}")
 
     changed_districts = []
-    for district in target_names:
-        prev_value = previous.get(district)
-        curr_value = current.get(district, 0)
+    if previous is not None:
+        for district in target_names:
+            prev_value = previous.get(district)
+            curr_value = current.get(district, 0)
+            if prev_value is None:
+                continue
 
-        if prev_value is None:
-            if curr_value > threshold:
+            if prev_value <= threshold < curr_value:
                 changed_districts.append(district)
-            continue
+                continue
 
-        if prev_value <= threshold < curr_value:
-            changed_districts.append(district)
-            continue
-
-        if prev_value > threshold and curr_value <= threshold:
-            changed_districts.append(district)
+            if prev_value > threshold and curr_value <= threshold:
+                changed_districts.append(district)
 
     print(f"[auto-check] chat={chat_id} target={target_region} changed={changed_districts}")
 
@@ -244,7 +242,7 @@ async def check_and_notify(bot: Bot, chat_id: int, region: str, threshold: int =
             for district in changed_districts
         ]
         print(f"[auto-notify] chat={chat_id} region={target_region} sending={lines}")
-        await send_message(bot, chat_id, "\n".join(lines))
+        await send_message(bot, chat_id, "Alert:\n" + "\n".join(lines))
 
 
 async def command_status(bot: Bot, chat_id: int, region: str):
@@ -311,8 +309,10 @@ async def threshold_command(message: types.Message):
 
 
 async def status_command(message: types.Message):
-    region = USER_REGIONS.get(message.chat.id, DEFAULT_REGION)
-    await command_status(message.bot, message.chat.id, region)
+    chat_id = message.chat.id
+    print(f"[status] chat={chat_id} user={message.from_user.id if message.from_user else None}")
+    region = USER_REGIONS.get(chat_id, DEFAULT_REGION)
+    await command_status(message.bot, chat_id, region)
 
 
 async def region_command(message: types.Message):
