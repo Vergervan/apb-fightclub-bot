@@ -242,7 +242,7 @@ async def check_and_notify(bot: Bot, chat_id: int, region: str, threshold: int =
             for district in changed_districts
         ]
         print(f"[auto-notify] chat={chat_id} region={target_region} sending={lines}")
-        await send_message(bot, chat_id, "Alert:\n" + "\n".join(lines))
+        await send_message(bot, chat_id, "".join(lines))
 
 
 async def command_status(bot: Bot, chat_id: int, region: str):
